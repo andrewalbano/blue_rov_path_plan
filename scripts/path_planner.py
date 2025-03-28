@@ -36,6 +36,7 @@ class WaypointManager:
 
         self.hold_pose_waypoint = PoseStamped()
         self.current_waypoint = PoseStamped()
+        self.current_waypoint.header.frame_id ="NED"
         self.waypoint_yaw = None
         self.current_waypoint_index = None  
 
@@ -49,10 +50,12 @@ class WaypointManager:
 
         # Current Pose 
         self.current_pose = PoseStamped()
+        self.current_pose.header.frame_id ="NED"
         self.current_roll,self.current_pitch,self.current_yaw = None, None, None
 
         # list of the target waypoints
         self.target_waypoints = PoseArray()
+        self.target_waypoints.header.frame_id = "NED"
         self.num_waypoints = None
         self.target_waypoint_sent =False
 
@@ -63,7 +66,12 @@ class WaypointManager:
 
 
     def controller_state_callback(self, msg:String):
-        self.state = msg.data            
+        self.state = msg.data
+        if self.state == "waypoint":
+            self.hold_pose_waypoint.header.frame_id = self.current_pose.header.frame_id
+            self.hold_pose_waypoint.pose.position = self.current_pose.pose.position
+            self.hold_pose_waypoint.pose.orientation = self.current_pose.pose.orientation
+            self.hold_pose_sent = False 
     
     def position_callback(self, msg:PoseWithCovarianceStamped):
 
@@ -96,7 +104,7 @@ class WaypointManager:
     def hold_pose_callback(self,msg:Bool):
         self.hold_pose = msg.data
         if self.hold_pose:
-            self.hold_pose_waypoint.header = self.current_pose.header
+            self.hold_pose_waypoint.header.frame_id = self.current_pose.header.frame_id
             self.hold_pose_waypoint.pose.position = self.current_pose.pose.position
             self.hold_pose_waypoint.pose.orientation = self.current_pose.pose.orientation
             self.hold_pose_sent = False
@@ -157,15 +165,15 @@ class WaypointManager:
             # if this is the first time setting it 
         if self.current_waypoint_index == None:
             self.current_waypoint_index = 0
-            rospy.loginfo_once("testing this loop")
+            # rospy.loginfo_once("testing this loop")
         if self.target_waypoints.poses:        
             self.current_waypoint.header.frame_id = self.target_waypoints.header.frame_id
             self.current_waypoint.pose = self.target_waypoints.poses[self.current_waypoint_index]
 
             _,_,self.waypoint_yaw = euler_from_quaternion([self.current_waypoint.pose.orientation.x,self.current_waypoint.pose.orientation.y, self.current_waypoint.pose.orientation.z, self.current_waypoint.pose.orientation.w])
-            rospy.loginfo_once(self.current_waypoint.pose)
+            # rospy.loginfo_once(self.current_waypoint.pose)
         else:
-            rospy.logerr(" Waypoints in path planner")
+            rospy.logerr("No waypoints in path planner")
     
 
 def main():
@@ -186,7 +194,7 @@ def main():
                 wp.waypoint_pub.publish(wp.hold_pose_waypoint)
                 wp.hold_pose_sent = True
                 wp.target_waypoint_sent = False # reset the flag for the waypoint follower loop
-                rospy.loginfo("sent hold position")
+                rospy.loginfo("Sent hold position")
             elif not wp.hold_pose:
                 # rospy.loginfo_once("testing this loop")
                 wp.get_current_waypoint()
@@ -200,59 +208,24 @@ def main():
 
                     
                     if wp.waypoint_reached(wp.current_pose,wp.current_waypoint):
-                        # rospy.loginfo_once("testing this loop")
                         
                         if wp.current_waypoint_index +1 < wp.num_waypoints:
                             wp.current_waypoint_index +=1
                             wp.get_current_waypoint()
-                            # wp.target_waypoint_sent = True
-
-                        # if not wp.target_waypoint_sent:
+                           
                             wp.waypoint_pub.publish(wp.current_waypoint)
-                            # wp.target_waypoint_sent = True
+                            
                             rospy.loginfo_once("sent new target waypoint")
                         elif wp.current_waypoint_index +1 == wp.num_waypoints:
-                            rospy.logwarn_throttle(5,"reached last waypoint")
+                            rospy.logwarn_throttle(5,"Reached last waypoint")
+
                         else:
                             rospy.loginfo_throttle(5,"Heading to waypoint")
                 except: 
-                    rospy.logerr("error with sending waypoint")
-
-                
-
-
-
-
-            #    if not wp.hold_pose and not wp.target_waypoint_sent and not wp.target_waypoints.poses:
-            #     wp.current_waypoint.header.frame_id = wp.target_waypoints.header.frame_id
-            #     wp.current_waypoint.pose = wp.target_waypoints.poses[0]
-            
-            #     wp.waypoint_pub.publish(wp.current_waypoint)
-            #     wp.target_waypoint_sent = True
-            #     rospy.loginfo_once("sent new target waypoint")
-
-            #     # rospy.loginfo_throttle(5," sending new waypoint")
-
-
-
-
-
-
-            # if hold pose is true and it was previously false:
-                # publish the hold pose waypoint
-
-                
-                
-
-            # if target waypoint is reached
-                # set new target waypoint from list, clear list of intermediate waypoints and generate new intermediate waypoints for the path
-                
-            # else use current pose to determine which intermediate waypoint to send
-
-        
-            # else not reached
-            # 
-            # publish next waypoint
+                    rospy.logerr("Error with sending waypoint")
+            else:
+                rospy.loginfo_throttle(5,"Holding Pose")
+   
         wp.rate.sleep()
 
 
