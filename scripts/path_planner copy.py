@@ -21,7 +21,7 @@ class WaypointManager:
         self.add_waypoint_sub = rospy.Subscriber('add_waypoint', PoseStamped, self.add_waypoint_callback)
         self.hold_pose_sub = rospy.Subscriber('hold_pose', Bool, self.hold_pose_callback)
 
-        self.int_poses_sub = rospy.Subscriber('int_poses', PoseArray, self.int_pose_callback)
+        # self.int_poses_sub = rospy.Subscriber('int_poses', PoseArray, self.int_poses_sub)
 
         # publishers
         self.waypoint_pub = rospy.Publisher('current_waypoint', PoseStamped, queue_size=1)
@@ -43,13 +43,11 @@ class WaypointManager:
         self.current_waypoint_index = None  
 
         self.current_int_waypoint = PoseStamped()
-        self.current_int_waypoint_index = None 
+        self.current_int_waypoint_index = None  
 
-        # list of all the waypoints
-        self.waypoints = PoseArray()
-        self.waypoints.header.frame_id = "NED"
-        # self.num_waypoints = None
-        # self.target_waypoint_sent =False 
+        
+
+
 
 
         # Current Pose 
@@ -101,9 +99,9 @@ class WaypointManager:
     #     # assigns waypoints
     #     self.target_waypoints = msg
 
-    def int_pose_callback(self, msg:PoseArray):
-        self.waypoints.poses= msg.poses
-        # self.num_waypoints = len(self.target_waypoints.poses)
+    # def int_poses_callback(self, msg:PoseArray):
+    #     self.target_waypoints.poses.append(msg.pose)
+    #     self.num_waypoints = len(self.target_waypoints.poses)
 
     def add_waypoint_callback(self, msg:PoseStamped):
         self.target_waypoints.poses.append(msg.pose)
