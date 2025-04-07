@@ -85,6 +85,9 @@ class WaypointManager:
         self.yaw_threshold = 10*np.pi/180
         self.lookahead_distance = 0.5
 
+
+        self.alg = 1
+
     
     def controller_state_callback(self, msg:String):
         # activate t
@@ -148,10 +151,7 @@ class WaypointManager:
             self.yaw_threshold = msg.data[1]*np.pi/180
         elif msg.data[0] == 3:
             self.lookahead_distance = msg.data[1] 
-               
-        
-
-       
+                   
     def waypoint_reached(self, current:PoseStamped, target:PoseStamped):
         _,_,target_yaw = euler_from_quaternion([target.pose.orientation.x,target.pose.orientation.y, target.pose.orientation.z, target.pose.orientation.w])
         _,_,current_yaw = euler_from_quaternion([current.pose.orientation.x,current.pose.orientation.y, current.pose.orientation.z, current.pose.orientation.w])
@@ -187,7 +187,6 @@ class WaypointManager:
         else:   
             return False
 
-   
     def position_reached(self, current:PoseStamped, target:PoseStamped):
        
         # calculate position errors in the NED FRAME
@@ -200,10 +199,7 @@ class WaypointManager:
             return True
         else: 
             return False
-
-      
-
-    
+             
     def get_current_waypoint(self):
     
 
@@ -239,10 +235,7 @@ class WaypointManager:
 
         except:
             self.current_waypoint.pose = self.current_pose.pose
-            rospy.logwarn(f"could not get waypoint for index {self.current_waypoint_index}, using current pose as waypoint")
-                
-
-            
+            rospy.logwarn(f"could not get waypoint for index {self.current_waypoint_index}, using current pose as waypoint")           
             
         
     def carrot_chasing(self):
@@ -300,10 +293,6 @@ class WaypointManager:
         
         else: 
             self.lookahead_waypoint.pose = self.current_waypoint.pose
-
-                    
-
-
 
     def lookahead_method1(self):
         # setting look ahead position
