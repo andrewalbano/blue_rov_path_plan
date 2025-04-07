@@ -26,46 +26,37 @@ class WaypointManager:
         self.add_waypoint_sub = rospy.Subscriber('add_waypoint', PoseStamped, self.add_waypoint_callback)
         self.hold_pose_sub = rospy.Subscriber('hold_pose', Bool, self.hold_pose_callback)
 
-        self.int_poses_sub = rospy.Subscriber('int_poses', PoseArray, self.int_pose_callback)
+        # self.int_poses_sub = rospy.Subscriber('int_poses', PoseArray, self.int_pose_callback)
         self.orientation_style_sub= rospy.Subscriber("path_orientation_style", Int8MultiArray,self.orientation_style_callback)
+        self.parameters_sub = rospy.Subscriber("path_planner_parameters", Float32MultiArray,self.parameters_callback)
 
         # publishers
         self.goal_waypoint_pub = rospy.Publisher('current_goal_waypoint', PoseStamped, queue_size=1)
         self.lookahead_waypoint_pub = rospy.Publisher('lookahead_waypoint', PoseStamped, queue_size=1)
 
+
+        # run frequency
         self.frequency = 10
         self.rate = rospy.Rate(self.frequency)
 
         # motion controller state
         self.state = "Disabled"
 
-        # Determine what to publish. either holding the current pose or the next waypoint
+        # Determine what waypoint type to publish. either holding the current pose or the next waypoint
+        # i only wnat to send the variable once not repeately so flag if sent, consider making this a service message
         self.hold_pose = True
-        self.hold_pose_sent = False # i only wnat to send the variable once not repeately so flag if sent
+        self.hold_pose_sent = False 
 
+        #  The waypoint to hold position at
         self.hold_pose_waypoint = PoseStamped()
+
+        # the current waypoint 
         self.current_waypoint = PoseStamped()
         self.current_waypoint.header.frame_id ="NED"
         self.waypoint_yaw = None
         self.current_waypoint_index = None  
 
-        self.current_int_waypoint = PoseStamped()
-        self.current_int_waypoint_index = None 
-
-        # list of all the waypoints
-        self.waypoints = PoseArray()
-        self.waypoints.header.frame_id = "NED"
-        # self.num_waypoints = None
-        # self.target_waypoint_sent =False 
-
-
-        # Current Pose 
-        # self.current_pose = PoseStamped()
-        # self.current_pose.header.frame_id ="NED"
-        # self.current_roll,self.current_pitch,self.current_yaw = None, None, None
-
-
-        # previous waypoint
+       # previous waypoint
         self.prev_waypoint = PoseStamped()
         self.prev_waypoint.header.frame_id ="NED"
 
@@ -73,28 +64,30 @@ class WaypointManager:
         self.next_waypoint = PoseStamped()
         self.next_waypoint.header.frame_id ="NED"
 
+
+        # the waypoint used to guide the robot, it is a point on the desired path with orientation specified
+        self.lookahead_waypoint = PoseStamped()
+        self.lookahead_waypoint.header.frame_id = "NED"
+
         # list of the target waypoints
         self.target_waypoints = PoseArray()
         self.target_waypoints.header.frame_id = "NED"
         self.num_waypoints = None
         self.target_waypoint_sent =False
 
-
-        self.lookahead_waypoint = PoseStamped()
-        self.lookahead_waypoint.header.frame_id = "NED"
-
+        #  the default orientation style when needed is RTR
         self.path_orientation_style = 4
+
+        self.orientation_style = Int8MultiArray()
 
         # need to make these adjustable in the user interface
         self.position_threshold = 0.2   
         self.yaw_threshold = 10*np.pi/180
         self.lookahead_distance = 0.5
 
-
-
-
     
     def controller_state_callback(self, msg:String):
+        # activate t
         self.state = msg.data
         if self.state == "waypoint":
             self.hold_pose_waypoint.header.frame_id = self.current_pose.header.frame_id
@@ -114,9 +107,9 @@ class WaypointManager:
         self.current_roll,self.current_pitch,self.current_yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])
 
 
-    def int_pose_callback(self, msg:PoseArray):
-        self.waypoints.poses= msg.poses
-        # self.num_waypoints = len(self.target_waypoints.poses)
+    # def int_pose_callback(self, msg:PoseArray):
+    #     self.waypoints.poses= msg.poses
+    #     # self.num_waypoints = len(self.target_waypoints.poses)
 
     def add_waypoint_callback(self, msg:PoseStamped):
         self.target_waypoints.poses.append(msg.pose)
@@ -147,15 +140,26 @@ class WaypointManager:
     def orientation_style_callback(self, msg:Int8MultiArray):
         self.orientation_style = msg
 
+    def parameters_callback(self,msg:Float32MultiArray):
+        
+        if msg.data[0] == 1:
+            self.position_threshold = msg.data[1] 
+        elif msg.data[0] == 2:
+            self.yaw_threshold = msg.data[1]*np.pi/180
+        elif msg.data[0] == 3:
+            self.lookahead_distance = msg.data[1] 
+               
+        
+
        
-    def waypoint_reached(self, current, target):
+    def waypoint_reached(self, current:PoseStamped, target:PoseStamped):
         _,_,target_yaw = euler_from_quaternion([target.pose.orientation.x,target.pose.orientation.y, target.pose.orientation.z, target.pose.orientation.w])
         _,_,current_yaw = euler_from_quaternion([current.pose.orientation.x,current.pose.orientation.y, current.pose.orientation.z, current.pose.orientation.w])
 
 
         # calculate the yaw error to final orientation
         yaw_error = target_yaw - current_yaw
-         # Normalize yaw error to [-pi, pi] range
+        #  Normalize yaw error to [-pi, pi] range
         if yaw_error> np.pi:
             yaw_error -= 2 * np.pi
         elif yaw_error < -np.pi:
@@ -172,16 +176,34 @@ class WaypointManager:
         else: 
             position_reached = False
 
-        if yaw_error < self.yaw_threshold:
+        if abs(yaw_error) < self.yaw_threshold:
             orientation_reached = True
         else: 
             orientation_reached = False
 
         if position_reached and orientation_reached:
+            # rospy.loginfo(f"yaw error = { yaw_error*180/np.pi}")
             return True
         else:   
             return False
 
+   
+    def position_reached(self, current:PoseStamped, target:PoseStamped):
+       
+        # calculate position errors in the NED FRAME
+        error_x = target.pose.position.x - current.pose.position.x
+        error_y = target.pose.position.y - current.pose.position.y
+        error_z = target.pose.position.z - current.pose.position.z
+        distance = np.linalg.norm((error_x, error_y, error_z))
+
+        if distance < self.position_threshold:
+            return True
+        else: 
+            return False
+
+      
+
+    
     def get_current_waypoint(self):
     
 
@@ -275,10 +297,12 @@ class WaypointManager:
         if not self.prev_waypoint == None: # possibly add: and not self.next_waypoint == None
             
             self.lookahead_waypoint = self.lookahead_method1()
-
-
+        
         else: 
             self.lookahead_waypoint.pose = self.current_waypoint.pose
+
+                    
+
 
 
     def lookahead_method1(self):
@@ -287,7 +311,8 @@ class WaypointManager:
         lookahead_pose.header.frame_id = "NED"
 
         if self.prev_waypoint == self.current_waypoint:
-            pass
+            rospy.loginfo("prev waypoint = current waypoint check")
+            # pass
         else:
             p1  = np.array([self.prev_waypoint.pose.position.x,self.prev_waypoint.pose.position.y, self.prev_waypoint.pose.position.z])
             p2  = np.array([self.current_waypoint.pose.position.x,self.current_waypoint.pose.position.y, self.current_waypoint.pose.position.z])
@@ -318,14 +343,11 @@ class WaypointManager:
                     # Calculate the closest point C
                     d_normalized = 0
                     closest_position = p1
-
-            
-                # Calculate the closest point C
-                closest_position = p1 + proj_v_onto_d
-
-                # Move distance units from C along the direction vector
-                if self.lookahead_distance > d_norm:
-                    self.lookahead_distance = d_norm
+                    rospy.logerr("got here")
+                
+                # # Move distance units from C along the direction vector
+                # if self.lookahead_distance > d_norm:
+                #     self.lookahead_distance = d_norm
                     
                 lookahead_position = closest_position + self.lookahead_distance * d_normalized
 
@@ -339,7 +361,7 @@ class WaypointManager:
 
 
                 if self.path_orientation_style == 1:            
-                    lookahead_pose.pose.orientation= self.prev_waypoint.pose.orientation
+                    lookahead_pose.pose.orientation = self.prev_waypoint.pose.orientation
                         
                 # smooth orientation
                 elif self.path_orientation_style == 3: 
@@ -466,10 +488,12 @@ class WaypointManager:
                         d_normalized = 0
                         closest_position = p1
 
-                    # Move distance units from C along the direction vector
-                    if self.lookahead_distance > d_norm:
-                        self.lookahead_distance = d_norm
-                        closest_position + self.lookahead_distance
+
+                    #  this has room for error TO DO
+
+                    # # Move distance units from C along the direction vector
+                    # if self.lookahead_distance > d_norm:
+                    #     self.lookahead_distance = d_norm
                         
                     lookahead_position = closest_position + self.lookahead_distance * d_normalized
 
@@ -481,10 +505,16 @@ class WaypointManager:
                     lookahead_pose.pose.position.z = lookahead_position[2]
 
 
-            # determine at what distance along path to make the point  =to the goal point
-            if d_norm - np.linalg.norm(lookahead_position-p1) <= 0:  
-                lookahead_pose = self.current_waypoint
+            # # determine at what distance along path to make the point  =to the goal point
+            # if d_norm - np.linalg.norm(lookahead_position-p1) <= 0:  
+            #     rospy.loginfo("got to last if statement")
+            #     lookahead_pose = self.current_waypoint
 
+
+            if d_norm - np.linalg.norm(lookahead_position-p1) <= 0-self.position_threshold:  
+                # rospy.loginfo("got to last if statement")
+                lookahead_pose = self.current_waypoint
+    
         return lookahead_pose
 
 
@@ -589,6 +619,7 @@ def main2():
 
                 # try:
                 if wp.waypoint_reached(wp.current_pose,wp.current_waypoint):
+                    # rospy.loginfo("Waypoint Reached, heading to next waypoint")
                     
                     if wp.current_waypoint_index +1 < wp.num_waypoints:
                         wp.current_waypoint_index +=1
@@ -618,7 +649,7 @@ def main2():
                     wp.lookahead_waypoint_pub.publish(wp.lookahead_waypoint)
                     # rospy.loginfo_throttle(5,"Heading to the target waypoint")
                     wp.goal_waypoint_pub.publish(wp.current_waypoint)
-                    rospy.loginfo_throttle(5,"chasing look ahead waypoint")
+                    # rospy.loginfo_throttle(5,"chasing look ahead waypoint")
             # except: 
             #     rospy.logerr("Error with sending waypoint, could not get look ahead, sending current goal waypoint")
             #     # rospy.logwarn("Could not get lookahead waypoint, setting the curent goal waypoint as the lookahead")
