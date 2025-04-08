@@ -84,9 +84,10 @@ class WaypointManager:
         self.position_threshold = 0.2   
         self.yaw_threshold = 10*np.pi/180
         self.lookahead_distance = 0.5
+        self.lookahead_past_waypoint = 0
 
 
-        self.alg = 1
+        self.alg = 2
 
     
     def controller_state_callback(self, msg:String):
@@ -151,6 +152,12 @@ class WaypointManager:
             self.yaw_threshold = msg.data[1]*np.pi/180
         elif msg.data[0] == 3:
             self.lookahead_distance = msg.data[1] 
+
+        elif msg.data[0] == 4:
+            self.lookahead_past_waypoint = msg.data[1] 
+
+        elif msg.data[0] == 5:
+            self.alg = msg.data[1] 
                    
     def waypoint_reached(self, current:PoseStamped, target:PoseStamped):
         _,_,target_yaw = euler_from_quaternion([target.pose.orientation.x,target.pose.orientation.y, target.pose.orientation.z, target.pose.orientation.w])
@@ -284,13 +291,19 @@ class WaypointManager:
 
     def get_lookahead_waypoint(self):
         # add various method of obtaining lookahead point here, start with position, once that works move to orientation styles
-
+        self.alg = 1
 
         # method 1: find the point on the line between previous waypoint and current waypoint that is closest to current pose and set the look ahead point as the point d distance away 
         if not self.prev_waypoint == None: # possibly add: and not self.next_waypoint == None
+            if self.alg == 1:
+                self.lookahead_waypoint = self.lookahead_method1()
+                # self.lookahead_waypoint = self.lookahead_method2(self.current_waypoint, self.prev_waypoint)
+            elif self.alg == 2: #and not self.next_waypoint==self.current_waypoint:
+                self.lookahead_waypoint =self.lookahead_method2(self.current_waypoint, self.prev_waypoint)
+                
+            else:
+                self.lookahead_waypoint =self.lookahead_method2(self.current_waypoint, self.prev_waypoint)
             
-            self.lookahead_waypoint = self.lookahead_method1()
-        
         else: 
             self.lookahead_waypoint.pose = self.current_waypoint.pose
 
@@ -333,6 +346,7 @@ class WaypointManager:
                     d_normalized = 0
                     closest_position = p1
                     rospy.logerr("got here")
+                    
                 
                 # # Move distance units from C along the direction vector
                 # if self.lookahead_distance > d_norm:
@@ -375,11 +389,15 @@ class WaypointManager:
                         delta_yaw -= 2 * np.pi
                     elif delta_yaw < -np.pi:
                         delta_yaw += 2 * np.pi
-
-                    distance_ratio = np.linalg.norm(lookahead_position-p1)/d_norm
+                    
+                    if not d_norm == 0:
+                        distance_ratio = np.linalg.norm(lookahead_position-p1)/d_norm
+                    else:
+                        #  this is the case where it is the last waypoint and lookahead is equal to the last waypoint
+                        distance_ratio = 1
 
                     # prevent overshooting th eration and going into the negatives
-                    if distance_ratio < 0:
+                    if distance_ratio <= 0:
                         distance_ratio =1
                     
                     lookahead_yaw = yaw1 + delta_yaw * distance_ratio
@@ -476,6 +494,7 @@ class WaypointManager:
                         # Calculate the closest point C
                         d_normalized = 0
                         closest_position = p1
+                        rospy.logerr("got here 2")
 
 
                     #  this has room for error TO DO
@@ -499,11 +518,476 @@ class WaypointManager:
             #     rospy.loginfo("got to last if statement")
             #     lookahead_pose = self.current_waypoint
 
-
-            if d_norm - np.linalg.norm(lookahead_position-p1) <= 0-self.position_threshold:  
+            #  tune THIS PARAMETER make it editable 
+            # if d_norm - np.linalg.norm(lookahead_position-p1) <= 0-self.position_threshold: 
+            # TO DO
+            # if d_norm - np.linalg.norm(lookahead_position-p1) <= 0-self.lookahead_distance/2:   
+            if d_norm - np.linalg.norm(lookahead_position-p1) <= -self.lookahead_past_waypoint:
                 # rospy.loginfo("got to last if statement")
-                lookahead_pose = self.current_waypoint
+                # lookahead_pose = self.current_waypoint
+                rospy.loginfo("running lookahead 3")
+
+                lookahead_pose = self.lookahead_method3(self.next_waypoint, self.current_waypoint)
     
+        return lookahead_pose
+
+
+
+    # same as method 1 just doesnt use th eobject specirfied 
+    def lookahead_method2(self, current:PoseStamped, prev:PoseStamped):
+        # setting look ahead position
+        lookahead_pose = PoseStamped()
+        lookahead_pose.header.frame_id = "NED"
+
+        if prev == current:
+            rospy.loginfo("prev waypoint = current waypoint check")
+            # pass
+        # elif current == next:
+        #     rospy.loginfo("next waypoint = current waypoint check")
+        #     return self.lookahead_method1()
+
+        else:
+            p1 = np.array([prev.pose.position.x,prev.pose.position.y, prev.pose.position.z])
+            p2  = np.array([current.pose.position.x,current.pose.position.y, current.pose.position.z])
+            # p2  = np.array([self.next_waypoint.pose.position.x,self.next_waypoint.pose.position.y, self.next_waypoint.pose.position.z])
+            p =  np.array([self.current_pose.pose.position.x, self.current_pose.pose.position.y, self.current_pose.pose.position.z])
+            
+
+            # Calculate the direction vector of the line (d)
+            d = p2 - p1
+            
+            # Calculate the norm of the direction vector
+            d_norm = np.linalg.norm(d)
+
+            if not self.path_orientation_style == 2:
+            
+                # Calculate the normalized direction vector
+                if not d_norm == 0:
+                    d_normalized = d / d_norm
+                    # Calculate the vector from A to P (v)
+                    v = p - p1
+                    
+                    # Calculate the projection of v onto d
+                    d_dot_d = np.dot(d, d) # Dot product of d with itself
+                    v_dot_d = np.dot(v, d) # Dot product of v with d
+                    proj_v_onto_d = (v_dot_d / d_dot_d) * d
+                    closest_position = p1 + proj_v_onto_d
+
+                else:
+                    # Calculate the closest point C
+                    d_normalized = 0
+                    closest_position = p1
+                    rospy.logerr("got here")
+                    
+                
+                # # Move distance units from C along the direction vector
+                # if self.lookahead_distance > d_norm:
+                #     self.lookahead_distance = d_norm
+                    
+                lookahead_position = closest_position + self.lookahead_distance * d_normalized
+
+
+                # # # setting look ahead position
+                # lookahead_pose = PoseStamped()
+                # lookahead_pose.header.frame_id = "NED"
+                lookahead_pose.pose.position.x = lookahead_position[0]
+                lookahead_pose.pose.position.y = lookahead_position[1]
+                lookahead_pose.pose.position.z = lookahead_position[2]
+
+
+                if self.path_orientation_style == 1:            
+                    lookahead_pose.pose.orientation = prev.pose.orientation
+                        
+                # smooth orientation
+                elif self.path_orientation_style == 3: 
+
+                    # if self.current_orientation_style
+                    # get start and target yaw
+                    roll1, pitch1, yaw1 = euler_from_quaternion([prev.pose.orientation.x, prev.pose.orientation.y, prev.pose.orientation.z, prev.pose.orientation.w])
+                    roll2, pitch2, yaw2 = euler_from_quaternion([current.pose.orientation.x, current.pose.orientation.y, current.pose.orientation.z, current.pose.orientation.w])
+                    # normalize the yaw
+                    if yaw1 > np.pi:
+                        yaw1 -= 2 * np.pi
+                    elif yaw1 < -np.pi:
+                        yaw1 += 2 * np.pi
+
+                    if yaw2 > np.pi:
+                        yaw2 -= 2 * np.pi
+                    elif yaw2 < -np.pi:
+                        yaw2 += 2 * np.pi
+
+                    delta_yaw = yaw2 - yaw1
+                    if delta_yaw > np.pi:
+                        delta_yaw -= 2 * np.pi
+                    elif delta_yaw < -np.pi:
+                        delta_yaw += 2 * np.pi
+                    
+                    if not d_norm == 0:
+                        distance_ratio = np.linalg.norm(lookahead_position-p1)/d_norm
+                    else:
+                        #  this is the case where it is the last waypoint and lookahead is equal to the last waypoint
+                        distance_ratio = 1
+
+                    # prevent overshooting th eration and going into the negatives
+                    if distance_ratio <= 0:
+                        distance_ratio =1
+                    
+                    lookahead_yaw = yaw1 + delta_yaw * distance_ratio
+
+                    if lookahead_yaw > np.pi:
+                        lookahead_yaw -= 2 * np.pi
+                    elif lookahead_yaw < -np.pi:
+                        lookahead_yaw += 2 * np.pi
+
+                    # get quaternion
+                    q = quaternion_from_euler(roll1,pitch1,lookahead_yaw)
+
+                    lookahead_pose.pose.orientation.x = q[0]
+                    lookahead_pose.pose.orientation.y = q[1]
+                    lookahead_pose.pose.orientation.z = q[2]
+                    lookahead_pose.pose.orientation.w = q[3]
+
+                    # # determine at what distance along path to make the point  =to the goal point
+                    # if d_norm - np.linalg.norm(lookahead_position-p1) < 0:  
+                    #     lookahead_pose = current
+
+                elif self.path_orientation_style == 4:
+                    
+                    # get start and target yaw
+                    roll1, pitch1, yaw1 = euler_from_quaternion([prev.pose.orientation.x, prev.pose.orientation.y, prev.pose.orientation.z, prev.pose.orientation.w])
+                    # roll2, pitch2, yaw2 = euler_from_quaternion([current.pose.orientation.x, current.pose.orientation.y, current.pose.orientation.z, current.pose.orientation.w])
+                    # normalize 
+                
+                    yaw = np.arctan2(d[1],d[0])
+
+                    if yaw > np.pi:
+                        yaw -= 2 * np.pi
+                    elif yaw < -np.pi:
+                        yaw += 2 * np.pi
+
+                    q = quaternion_from_euler(roll1,pitch1,yaw)
+
+                    lookahead_pose.pose.orientation.x = q[0]
+                    lookahead_pose.pose.orientation.y = q[1]
+                    lookahead_pose.pose.orientation.z = q[2]
+                    lookahead_pose.pose.orientation.w = q[3]
+
+                       
+                    # calculate the yaw error to final orientation
+                    yaw_error = yaw - self.current_yaw
+                    # Normalize yaw error to [-pi, pi] range
+                    if yaw_error> np.pi:
+                        yaw_error -= 2 * np.pi
+                    elif yaw_error < -np.pi:
+                        yaw_error += 2 * np.pi
+
+
+                    # overwrite the look ahead position
+                    if yaw_error > self.yaw_threshold:
+                        lookahead_pose.pose.position = prev.pose.position
+                        lookahead_position = p1
+                    
+
+            
+            elif self.path_orientation_style == 2: 
+                lookahead_pose.pose.orientation = current.pose.orientation
+                
+                # _,_,target_yaw = euler_from_quaternion([current.pose.orientation.x,current.pose.orientation.y, current.pose.orientation.z, current.pose.orientation.w])
+                
+                # current_yaw = euler_from_quaternion([self.c.pose.orientation.x,current.pose.orientation.y, current.pose.orientation.z, current.pose.orientation.w])
+
+
+                # calculate the yaw error to final orientation
+                yaw_error = self.waypoint_yaw - self.current_yaw
+                # Normalize yaw error to [-pi, pi] range
+                if yaw_error> np.pi:
+                    yaw_error -= 2 * np.pi
+                elif yaw_error < -np.pi:
+                    yaw_error += 2 * np.pi
+
+                if yaw_error > self.yaw_threshold:
+                    lookahead_pose.pose.position = prev.pose.position
+                    lookahead_position = p1
+                else:
+            
+                    # Calculate the normalized direction vector
+                    if not d_norm == 0:
+                        d_normalized = d / d_norm
+                        # Calculate the vector from A to P (v)
+                        v = p - p1
+                        
+                        # Calculate the projection of v onto d
+                        d_dot_d = np.dot(d, d) # Dot product of d with itself
+                        v_dot_d = np.dot(v, d) # Dot product of v with d
+                        proj_v_onto_d = (v_dot_d / d_dot_d) * d
+                        closest_position = p1 + proj_v_onto_d
+
+                    else:
+                        # Calculate the closest point C
+                        d_normalized = 0
+                        closest_position = p1
+                        rospy.logerr("got here 2")
+
+
+                    #  this has room for error TO DO
+
+                    # # Move distance units from C along the direction vector
+                    # if self.lookahead_distance > d_norm:
+                    #     self.lookahead_distance = d_norm
+                        
+                    lookahead_position = closest_position + self.lookahead_distance * d_normalized
+
+
+                    # # # setting look ahead position
+            
+                    lookahead_pose.pose.position.x = lookahead_position[0]
+                    lookahead_pose.pose.position.y = lookahead_position[1]
+                    lookahead_pose.pose.position.z = lookahead_position[2]
+
+
+            # # determine at what distance along path to make the point  =to the goal point
+            # if d_norm - np.linalg.norm(lookahead_position-p1) <= 0:  
+            #     rospy.loginfo("got to last if statement")
+            #     lookahead_pose = current
+
+            #  tune THIS PARAMETER make it editable 
+            # if d_norm - np.linalg.norm(lookahead_position-p1) <= 0-self.position_threshold: 
+            # if d_norm - np.linalg.norm(lookahead_position-p1) <= 0-self.lookahead_distance/2:   
+            if d_norm - np.linalg.norm(lookahead_position-p1) <= -self.lookahead_past_waypoint:
+                # rospy.loginfo("got to last if statement")
+                lookahead_pose = current
+
+    
+        return lookahead_pose
+
+       # same as method 1 just doesnt use th eobject specirfied 
+    
+    def lookahead_method3(self, current:PoseStamped, prev:PoseStamped):
+        # setting look ahead position
+        lookahead_pose = PoseStamped()
+        lookahead_pose.header.frame_id = "NED"
+
+        if prev == current:
+            rospy.loginfo("prev waypoint = current waypoint check")
+            # pass
+        # elif current == next:
+        #     rospy.loginfo("next waypoint = current waypoint check")
+        #     return self.lookahead_method1()
+
+        else:
+            p1 = np.array([prev.pose.position.x,prev.pose.position.y, prev.pose.position.z])
+            p2  = np.array([current.pose.position.x,current.pose.position.y, current.pose.position.z])
+            # p2  = np.array([self.next_waypoint.pose.position.x,self.next_waypoint.pose.position.y, self.next_waypoint.pose.position.z])
+            p =  np.array([self.current_pose.pose.position.x, self.current_pose.pose.position.y, self.current_pose.pose.position.z])
+            
+
+            # Calculate the direction vector of the line (d)
+            d = p2 - p1
+            
+            # Calculate the norm of the direction vector
+            d_norm = np.linalg.norm(d)
+
+            if not self.path_orientation_style == 2:
+            
+                # Calculate the normalized direction vector
+                if not d_norm == 0:
+                    d_normalized = d / d_norm
+                    # Calculate the vector from A to P (v)
+                    v = p - p1
+                    
+                    # Calculate the projection of v onto d
+                    d_dot_d = np.dot(d, d) # Dot product of d with itself
+                    v_dot_d = np.dot(v, d) # Dot product of v with d
+                    proj_v_onto_d = (v_dot_d / d_dot_d) * d
+                    closest_position = p1 + proj_v_onto_d
+
+                else:
+                    # Calculate the closest point C
+                    d_normalized = 0
+                    closest_position = p1
+                    rospy.logerr("got here")
+                    
+                
+                # # Move distance units from C along the direction vector
+                # if self.lookahead_distance > d_norm:
+                #     self.lookahead_distance = d_norm
+                    
+                lookahead_position = closest_position + self.lookahead_distance * d_normalized
+
+
+                # # # setting look ahead position
+                # lookahead_pose = PoseStamped()
+                # lookahead_pose.header.frame_id = "NED"
+                lookahead_pose.pose.position.x = lookahead_position[0]
+                lookahead_pose.pose.position.y = lookahead_position[1]
+                lookahead_pose.pose.position.z = lookahead_position[2]
+
+
+                if self.path_orientation_style == 1:            
+                    lookahead_pose.pose.orientation = prev.pose.orientation
+                        
+                # smooth orientation
+                elif self.path_orientation_style == 3: 
+
+                    # if self.current_orientation_style
+                    # get start and target yaw
+                    roll1, pitch1, yaw1 = euler_from_quaternion([prev.pose.orientation.x, prev.pose.orientation.y, prev.pose.orientation.z, prev.pose.orientation.w])
+                    roll2, pitch2, yaw2 = euler_from_quaternion([current.pose.orientation.x, current.pose.orientation.y, current.pose.orientation.z, current.pose.orientation.w])
+                    # normalize the yaw
+                    if yaw1 > np.pi:
+                        yaw1 -= 2 * np.pi
+                    elif yaw1 < -np.pi:
+                        yaw1 += 2 * np.pi
+
+                    if yaw2 > np.pi:
+                        yaw2 -= 2 * np.pi
+                    elif yaw2 < -np.pi:
+                        yaw2 += 2 * np.pi
+
+                    delta_yaw = yaw2 - yaw1
+                    if delta_yaw > np.pi:
+                        delta_yaw -= 2 * np.pi
+                    elif delta_yaw < -np.pi:
+                        delta_yaw += 2 * np.pi
+                    
+                    if not d_norm == 0:
+                        distance_ratio = np.linalg.norm(lookahead_position-p1)/d_norm
+                    else:
+                        #  this is the case where it is the last waypoint and lookahead is equal to the last waypoint
+                        distance_ratio = 1
+
+                    # prevent overshooting th eration and going into the negatives
+                    if distance_ratio <= 0:
+                        distance_ratio =1
+                    
+                    lookahead_yaw = yaw1 + delta_yaw * distance_ratio
+
+                    if lookahead_yaw > np.pi:
+                        lookahead_yaw -= 2 * np.pi
+                    elif lookahead_yaw < -np.pi:
+                        lookahead_yaw += 2 * np.pi
+
+                    # get quaternion
+                    q = quaternion_from_euler(roll1,pitch1,lookahead_yaw)
+
+                    lookahead_pose.pose.orientation.x = q[0]
+                    lookahead_pose.pose.orientation.y = q[1]
+                    lookahead_pose.pose.orientation.z = q[2]
+                    lookahead_pose.pose.orientation.w = q[3]
+
+                    # # determine at what distance along path to make the point  =to the goal point
+                    # if d_norm - np.linalg.norm(lookahead_position-p1) < 0:  
+                    #     lookahead_pose = current
+
+                elif self.path_orientation_style == 4:
+                    
+                    # get start and target yaw
+                    roll1, pitch1, yaw1 = euler_from_quaternion([prev.pose.orientation.x, prev.pose.orientation.y, prev.pose.orientation.z, prev.pose.orientation.w])
+                    # roll2, pitch2, yaw2 = euler_from_quaternion([current.pose.orientation.x, current.pose.orientation.y, current.pose.orientation.z, current.pose.orientation.w])
+                    # normalize 
+                
+                    yaw = np.arctan2(d[1],d[0])
+
+                    if yaw > np.pi:
+                        yaw -= 2 * np.pi
+                    elif yaw < -np.pi:
+                        yaw += 2 * np.pi
+
+                    q = quaternion_from_euler(roll1,pitch1,yaw)
+
+                    lookahead_pose.pose.orientation.x = q[0]
+                    lookahead_pose.pose.orientation.y = q[1]
+                    lookahead_pose.pose.orientation.z = q[2]
+                    lookahead_pose.pose.orientation.w = q[3]
+
+                       
+                    # calculate the yaw error to final orientation
+                    yaw_error = yaw - self.current_yaw
+
+                    # Normalize yaw error to [-pi, pi] range
+                    if yaw_error> np.pi:
+                        yaw_error -= 2 * np.pi
+                    elif yaw_error < -np.pi:
+                        yaw_error += 2 * np.pi
+
+
+                    # overwrite the look ahead position
+                    if yaw_error > self.yaw_threshold:
+                        lookahead_pose.pose.position = prev.pose.position
+                        lookahead_position = p1
+                    
+
+            
+            elif self.path_orientation_style == 2: 
+                lookahead_pose.pose.orientation = current.pose.orientation
+                
+                # _,_,target_yaw = euler_from_quaternion([current.pose.orientation.x,current.pose.orientation.y, current.pose.orientation.z, current.pose.orientation.w])
+                
+                # current_yaw = euler_from_quaternion([self.c.pose.orientation.x,current.pose.orientation.y, current.pose.orientation.z, current.pose.orientation.w])
+
+
+                # calculate the yaw error to final orientation
+                yaw_error = self.waypoint_yaw - self.current_yaw
+                # Normalize yaw error to [-pi, pi] range
+                if yaw_error> np.pi:
+                    yaw_error -= 2 * np.pi
+                elif yaw_error < -np.pi:
+                    yaw_error += 2 * np.pi
+
+                if yaw_error > self.yaw_threshold:
+                    lookahead_pose.pose.position = prev.pose.position
+                    lookahead_position = p1
+                else:
+            
+                    # Calculate the normalized direction vector
+                    if not d_norm == 0:
+                        d_normalized = d / d_norm
+                        # Calculate the vector from A to P (v)
+                        v = p - p1
+                        
+                        # Calculate the projection of v onto d
+                        d_dot_d = np.dot(d, d) # Dot product of d with itself
+                        v_dot_d = np.dot(v, d) # Dot product of v with d
+                        proj_v_onto_d = (v_dot_d / d_dot_d) * d
+                        closest_position = p1 + proj_v_onto_d
+
+                    else:
+                        # Calculate the closest point C
+                        d_normalized = 0
+                        closest_position = p1
+                        rospy.logerr("got here 2")
+
+
+                    #  this has room for error TO DO
+
+                    # # Move distance units from C along the direction vector
+                    # if self.lookahead_distance > d_norm:
+                    #     self.lookahead_distance = d_norm
+                        
+                    lookahead_position = closest_position + self.lookahead_distance * d_normalized
+
+
+                    # # # setting look ahead position
+            
+                    lookahead_pose.pose.position.x = lookahead_position[0]
+                    lookahead_pose.pose.position.y = lookahead_position[1]
+                    lookahead_pose.pose.position.z = lookahead_position[2]
+
+
+            # # determine at what distance along path to make the point  =to the goal point
+            # if d_norm - np.linalg.norm(lookahead_position-p1) <= 0:  
+            #     rospy.loginfo("got to last if statement")
+            #     lookahead_pose = current
+
+            #  tune THIS PARAMETER make it editable 
+            # if d_norm - np.linalg.norm(lookahead_position-p1) <= 0-self.position_threshold: 
+            # if d_norm - np.linalg.norm(lookahead_position-p1) <= 0-self.lookahead_distance/2:   
+            if d_norm - np.linalg.norm(lookahead_position-p1) <= -self.lookahead_past_waypoint:
+                # rospy.loginfo("got to last if statement")
+                rospy.loginfo("got here 5")
+                lookahead_pose = current
+                
+
         return lookahead_pose
 
 
@@ -520,7 +1004,7 @@ def main():
 
     while not rospy.is_shutdown():
 
-        
+        # need to look into adjusting to the target hold pose once i receive it sometimes im overshooting it 
         if wp.state == "waypoint":
             rospy.loginfo_once("started wp mode")
             
@@ -573,7 +1057,7 @@ def main2():
 
     while not rospy.is_shutdown():
 
-        
+        # need to look into adjusting to the target hold pose once i receive it sometimes im overshooting it 
         if wp.state == "waypoint":
             rospy.loginfo_once("started wp mode")
             
