@@ -9,6 +9,7 @@ from pymavlink import mavutil
 from pymavlink.quaternion import QuaternionBase
 from std_msgs.msg import Bool, Int8, Float32MultiArray, String,Int8MultiArray
 import time
+import dubins
 
 
 class WaypointManager:
@@ -226,7 +227,11 @@ class WaypointManager:
                 # rospy.loginfo_once(self.current_waypoint.pose)
 
                 try:
-                    self.path_orientation_style = self.orientation_style.data[self.current_waypoint_index]
+                    #  work around to publist as one list 
+                    self.path_orientation_style = self.orientation_style.data[self.current_waypoint_index*2]
+                    self.alg = self.orientation_style.data[self.current_waypoint_index*2+1]
+                    # self.path_orientation_style = self.orientation_style.data[self.current_waypoint_index,0]
+                    # self.alg = self.orientation_style.data[self.current_waypoint_index,1]
                 except: 
                     self.current_waypoint.header.frame_id = self.current_pose.header.frame_id
                     self.current_waypoint.pose = self.current_pose.pose
@@ -244,7 +249,6 @@ class WaypointManager:
             self.current_waypoint.pose = self.current_pose.pose
             rospy.logwarn(f"could not get waypoint for index {self.current_waypoint_index}, using current pose as waypoint")           
             
-        
     def carrot_chasing(self):
         # let d  = crosstrack error 
         self.get_current_waypoint()
@@ -263,7 +267,6 @@ class WaypointManager:
         # self.heading = np.arctan2(y_t_prime-self.current_pose.pose.position.y,x_t_prime-self.current_pose.pose.position.x)
         # u = self.Kp_yaw()
 
-
     def get_prev_waypoint(self):
         # if self.current_waypoint_index == 0:
         #     self.prev_waypoint = None
@@ -278,7 +281,6 @@ class WaypointManager:
             self.prev_waypoint.header.frame_id = self.hold_pose_waypoint.header.frame_id
             self.prev_waypoint.pose = self.hold_pose_waypoint.pose
             
-
     def get_next_waypoint(self):
         self.next_waypoint = PoseStamped()
 
@@ -291,17 +293,18 @@ class WaypointManager:
 
     def get_lookahead_waypoint(self):
         # add various method of obtaining lookahead point here, start with position, once that works move to orientation styles
-        self.alg = 1
+        # self.alg = 1
 
         # method 1: find the point on the line between previous waypoint and current waypoint that is closest to current pose and set the look ahead point as the point d distance away 
         if not self.prev_waypoint == None: # possibly add: and not self.next_waypoint == None
-            if self.alg == 1:
+            if self.alg == 1 and not self.next_waypoint ==None:
                 self.lookahead_waypoint = self.lookahead_method1()
                 # self.lookahead_waypoint = self.lookahead_method2(self.current_waypoint, self.prev_waypoint)
-            elif self.alg == 2: #and not self.next_waypoint==self.current_waypoint:
+            elif self.alg == 2 and not self.next_waypoint ==None: #and not self.next_waypoint==self.current_waypoint:
                 self.lookahead_waypoint =self.lookahead_method2(self.current_waypoint, self.prev_waypoint)
                 
             else:
+                rospy.logwarn("could not use the requested alg, defaulting to alg 2")
                 self.lookahead_waypoint =self.lookahead_method2(self.current_waypoint, self.prev_waypoint)
             
         else: 
@@ -530,8 +533,6 @@ class WaypointManager:
                 lookahead_pose = self.lookahead_method3(self.next_waypoint, self.current_waypoint)
     
         return lookahead_pose
-
-
 
     # same as method 1 just doesnt use th eobject specirfied 
     def lookahead_method2(self, current:PoseStamped, prev:PoseStamped):
