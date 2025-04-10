@@ -9,7 +9,7 @@ from pymavlink import mavutil
 from pymavlink.quaternion import QuaternionBase
 from std_msgs.msg import Bool, Int8, Float32MultiArray, String,Int8MultiArray
 import time
-import dubins
+# import dubins
 
 
 class WaypointManager:
