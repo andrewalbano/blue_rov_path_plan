@@ -177,7 +177,13 @@ class WaypointManager:
         error_x = target.pose.position.x - current.pose.position.x
         error_y = target.pose.position.y - current.pose.position.y
         error_z = target.pose.position.z - current.pose.position.z
-        distance = np.linalg.norm((error_x, error_y, error_z))
+        
+        if self.ignore_depth:
+            distance = np.linalg.norm((error_x, error_y))
+        else:
+            distance = np.linalg.norm((error_x, error_y, error_z))
+
+        
 
         if distance < self.position_threshold:
             position_reached = True
