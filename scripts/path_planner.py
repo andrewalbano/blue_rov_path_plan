@@ -18,7 +18,7 @@ class WaypointManager:
         self.current_pose = PoseStamped()
         self.current_pose.header.frame_id ="NED"
         self.current_roll,self.current_pitch,self.current_yaw = None, None, None
-
+        self.ignore_depth =False
         # creating subscribers
         self.controller_state_sub = rospy.Subscriber('motion_controller_state', String, self.controller_state_callback)
         self.pose_sub = rospy.Subscriber('/state', PoseWithCovarianceStamped, self.position_callback)
@@ -82,8 +82,8 @@ class WaypointManager:
         self.orientation_style = Int8MultiArray()
 
         # need to make these adjustable in the user interface
-        self.position_threshold = 0.2   
-        self.yaw_threshold = 10*np.pi/180
+        self.position_threshold = 0.3
+        self.yaw_threshold = 5*np.pi/180
         self.lookahead_distance = 0.5
         self.lookahead_past_waypoint = 0
 
@@ -201,7 +201,11 @@ class WaypointManager:
         error_x = target.pose.position.x - current.pose.position.x
         error_y = target.pose.position.y - current.pose.position.y
         error_z = target.pose.position.z - current.pose.position.z
-        distance = np.linalg.norm((error_x, error_y, error_z))
+
+        if self.ignore_depth:
+            distance = np.linalg.norm((error_x, error_y))
+        else:
+            distance = np.linalg.norm((error_x, error_y, error_z))
 
         if distance < self.position_threshold:
             return True
@@ -1055,6 +1059,7 @@ def main2():
     
     # initialize the waypoint manager
     wp = WaypointManager()
+    wp.ignore_depth = True
 
     while not rospy.is_shutdown():
 
