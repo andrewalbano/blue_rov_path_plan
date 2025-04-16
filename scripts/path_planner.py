@@ -18,7 +18,7 @@ class WaypointManager:
         self.current_pose = PoseStamped()
         self.current_pose.header.frame_id ="NED"
         self.current_roll,self.current_pitch,self.current_yaw = None, None, None
-        self.ignore_depth =False
+        self.ignore_depth = False
         # creating subscribers
         self.controller_state_sub = rospy.Subscriber('motion_controller_state', String, self.controller_state_callback)
         self.pose_sub = rospy.Subscriber('/state', PoseWithCovarianceStamped, self.position_callback)
@@ -37,7 +37,7 @@ class WaypointManager:
 
 
         # run frequency
-        self.frequency = 10
+        self.frequency = 30
         self.rate = rospy.Rate(self.frequency)
 
         # motion controller state
@@ -84,11 +84,20 @@ class WaypointManager:
         # need to make these adjustable in the user interface
         self.position_threshold = 0.3
         self.yaw_threshold = 5*np.pi/180
+
+        # should consider making the lookahead distance relative to the cross track error 
         self.lookahead_distance = 0.5
         self.lookahead_past_waypoint = 0
 
 
         self.alg = 2
+
+
+        self.tr_flag1 =False
+        self.rt_flag1 = False
+        self.rtr_flag1 = False
+        # self.rtr_flag2 = False
+        # self.rtr_flag3 = False
 
     
     def controller_state_callback(self, msg:String):
@@ -141,6 +150,7 @@ class WaypointManager:
             self.num_waypoints = None
             self.current_waypoint_index = None
             self.target_waypoint_sent = False
+            self.reset_all_flags()
 
     def orientation_style_callback(self, msg:Int8MultiArray):
         self.orientation_style = msg
@@ -217,7 +227,32 @@ class WaypointManager:
             return True
         else: 
             return False
-             
+
+    def orientation_reached(self, current:PoseStamped, target:PoseStamped):
+        _,_,target_yaw = euler_from_quaternion([target.pose.orientation.x,target.pose.orientation.y, target.pose.orientation.z, target.pose.orientation.w])
+        _,_,current_yaw = euler_from_quaternion([current.pose.orientation.x,current.pose.orientation.y, current.pose.orientation.z, current.pose.orientation.w])
+
+
+        # calculate the yaw error to final orientation
+        yaw_error = target_yaw - current_yaw
+        #  Normalize yaw error to [-pi, pi] range
+        if yaw_error> np.pi:
+            yaw_error -= 2 * np.pi
+        elif yaw_error < -np.pi:
+            yaw_error += 2 * np.pi
+
+        if abs(yaw_error) < self.yaw_threshold:
+            return True
+        else: 
+            return False
+
+    
+    def reset_all_flags(self):
+        self.tr_flag1 =False
+        self.rt_flag1 = False
+        self.rtr_flag1 = False
+
+
     def get_current_waypoint(self):
     
 
@@ -1003,8 +1038,665 @@ class WaypointManager:
 
 
 
-
+    # lookahead methods for algorithm 2
+    def lookahead_method_TR(self, target:PoseStamped, prev:PoseStamped):
+        # setting look ahead position
+        lookahead_pose = PoseStamped()
+        lookahead_pose.header.frame_id = "NED"
         
+        if prev == target:
+            rospy.loginfo("prev waypoint = current waypoint check")
+        elif prev.pose.position == target.pose.position:
+            # if they are coincident then just need to rotate 
+            lookahead_pose = target
+            rospy.loginfo("waypoints are coincident")
+        elif self.position_reached(self.current_pose, target) or self.rtr_flag1:
+                self.tr_flag1 = True
+                lookahead_pose.pose = target.pose
+        
+        else:
+            p1 = np.array([prev.pose.position.x,prev.pose.position.y, prev.pose.position.z])
+            p2  = np.array([target.pose.position.x,target.pose.position.y, target.pose.position.z])
+            p =  np.array([self.current_pose.pose.position.x, self.current_pose.pose.position.y, self.current_pose.pose.position.z])
+            
+            # Calculate the direction vector of the line (d)
+            d = p2 - p1
+            
+            # Calculate the norm of the direction vector between the two waypoints
+            d_norm = np.linalg.norm(d)
+
+            d_normalized = d / d_norm
+
+            # Calculate the vector from p1 to P (v)
+            v = p - p1
+            
+            # Calculate the closest point on the path to the current pose
+            proj_v_onto_d = (np.dot(v, d) /np.dot(d, d) ) * d
+            closest_position = p1 + proj_v_onto_d
+
+            lookahead_position = closest_position + self.lookahead_distance * d_normalized
+
+          
+            # Check if the closest position is beyond the target
+            if np.linalg.norm(closest_position - p1) > np.linalg.norm(p2 - p1):
+                # rospy.loginfo("Current position is beyond the target point. Setting lookahead to target.")
+                lookahead_pose.pose = target.pose
+
+            # elif np.linalg.norm(lookahead_position - p1) - np.linalg.norm(p2 - p1):
+            elif np.linalg.norm(lookahead_position - p1) - np.linalg.norm(p2 - p1) > self.lookahead_past_waypoint:
+                # rospy.loginfo("Lookahead position is beyond the allowable lookahead distance from target. Setting lookahead to target.")
+                lookahead_pose.pose = target.pose
+
+            # Check if the lookahead position is beyond the target
+            # elif np.linalg.norm(lookahead_position - p1) > np.linalg.norm(p2 - p1):
+            #     rospy.loginfo("Lookahead position is beyond the target. Setting lookahead to target.")
+            #     lookahead_pose.pose = target.pose
+            else:
+                # setting the lookahead pose position
+                lookahead_pose.pose.position.x = lookahead_position[0]
+                lookahead_pose.pose.position.y = lookahead_position[1]
+                lookahead_pose.pose.position.z = lookahead_position[2]
+                lookahead_pose.pose.orientation = prev.pose.orientation
+
+        # override the depth because we use their depth controller 
+        lookahead_pose.pose.position.z = target.pose.position.z
+        return lookahead_pose
+
+    def lookahead_method_RT(self, target:PoseStamped, prev:PoseStamped):
+        # setting look ahead position
+        lookahead_pose = PoseStamped()
+        lookahead_pose.header.frame_id = "NED"
+        
+        if prev == target:
+            rospy.loginfo("prev waypoint = current waypoint check")
+
+        elif prev.pose.position == target.pose.position:
+            # if they are coincident then just need to rotate 
+            lookahead_pose = target
+            rospy.loginfo("waypoints are coincident")
+        else: 
+            # once orientation is reached always use lookahead pose and adjsut orientation as needed
+            if self.orientation_reached(self.current_pose, target) and not self.rtr_flag1:
+                self.rtr_flag1 = True
+                
+            if self.rtr_flag1:
+                p1 = np.array([prev.pose.position.x,prev.pose.position.y, prev.pose.position.z])
+                p2  = np.array([target.pose.position.x,target.pose.position.y, target.pose.position.z])
+                p =  np.array([self.current_pose.pose.position.x, self.current_pose.pose.position.y, self.current_pose.pose.position.z])
+                
+                
+                # Calculate the direction vector of the line (d)
+                d = p2 - p1
+                
+                # Calculate the norm of the direction vector between the two waypoints
+                d_norm = np.linalg.norm(d)
+
+                d_normalized = d / d_norm
+
+                # Calculate the vector from p1 to P (v)
+                v = p - p1
+                
+                # Calculate the closest point on the path to the current pose
+                proj_v_onto_d = (np.dot(v, d) /np.dot(d, d) ) * d
+                closest_position = p1 + proj_v_onto_d
+
+                lookahead_position = closest_position + self.lookahead_distance * d_normalized
+
+            
+
+                # Check if the closest position is beyond the target
+                if np.linalg.norm(closest_position - p1) > np.linalg.norm(p2 - p1):
+                    # rospy.loginfo("Current position is beyond the target point. Setting lookahead to target.")
+                    lookahead_pose.pose = target.pose
+                
+                # elif np.linalg.norm(lookahead_position - p1) - np.linalg.norm(p2 - p1):
+                elif np.linalg.norm(lookahead_position - p1) - np.linalg.norm(p2 - p1) > self.lookahead_past_waypoint:
+                    # rospy.loginfo("Lookahead position is beyond the allowable lookahead distance from target. Setting lookahead to target.")
+                    lookahead_pose.pose = target.pose
+
+                elif not self.position_reached(self.current_pose, target) and self.orientation_reached(self.current_pose, target):
+                    # once orientation is reached this flag ensures that while travelling along the path we just fix the orientation as we go
+                    lookahead_pose.pose.position.x = lookahead_position[0]
+                    lookahead_pose.pose.position.y = lookahead_position[1]
+                    lookahead_pose.pose.position.z = lookahead_position[2]
+                    lookahead_pose.pose.orientation = target.pose.orientation
+                
+
+            else:
+                lookahead_pose.pose.position.x = prev.pose.position.x
+                lookahead_pose.pose.position.y = prev.pose.position.y
+                lookahead_pose.pose.position.z = prev.pose.position.z
+                lookahead_pose.pose.orientation = target.pose.orientation
+
+
+        # override the depth because we use their depth controller 
+        lookahead_pose.pose.position.z = target.pose.position.z
+
+        return lookahead_pose
+    
+    def lookahead_method_RTR(self, target:PoseStamped, prev:PoseStamped):
+        # setting look ahead position
+        lookahead_pose = PoseStamped()
+        lookahead_pose.header.frame_id = "NED"
+        
+        if prev == target:
+            rospy.loginfo("prev waypoint = current waypoint check")
+
+        elif prev.pose.position == target.pose.position:
+            # if they are coincident then just need to rotate 
+            lookahead_pose = target
+            rospy.loginfo("waypoints are coincident")
+
+        elif self.position_reached(self.current_pose, target):
+            lookahead_pose = target
+            # rospy.loginfo("Only need to adjust orientation")
+            # rospy.loginfo("Rotation 2")
+        else:
+            p1 = np.array([prev.pose.position.x,prev.pose.position.y, prev.pose.position.z])
+            p2  = np.array([target.pose.position.x,target.pose.position.y, target.pose.position.z])
+            p =  np.array([self.current_pose.pose.position.x, self.current_pose.pose.position.y, self.current_pose.pose.position.z])
+            
+            # Calculate the direction vector of the line (d)
+            d = p2 - p1
+
+            # get yaw to face target waypoint and normalize it
+            yaw = np.arctan2(d[1],d[0])
+            if yaw > np.pi:
+                yaw -= 2 * np.pi
+            elif yaw < -np.pi:
+                yaw += 2 * np.pi
+
+            # calculate the yaw error to face waypoint
+            yaw_error = yaw - self.current_yaw
+            #  Normalize yaw error to [-pi, pi] range
+            if yaw_error> np.pi:
+                yaw_error -= 2 * np.pi
+            elif yaw_error < -np.pi:
+                yaw_error += 2 * np.pi
+
+
+            # check if we need to make first rotation
+            if abs(yaw_error) < self.yaw_threshold:
+                self.rtr_flag1 = True
+                # rospy.loginfo(f"yaw error {yaw_error}")
+
+            if not self.rtr_flag1:
+                # rospy.loginfo("Rotation 1")
+                                             
+                # adjust orientation
+                lookahead_pose.pose.position = prev.pose.position
+                q = quaternion_from_euler(0, 0, yaw)
+                lookahead_pose.pose.orientation.x = q[0]
+                lookahead_pose.pose.orientation.y = q[1]
+                lookahead_pose.pose.orientation.z = q[2]
+                lookahead_pose.pose.orientation.w = q[3]
+
+            elif self.rtr_flag1:
+                # rospy.loginfo("Translation")
+                # Calculate the norm of the direction vector between the two waypoints
+                d_norm = np.linalg.norm(d)
+
+                d_normalized = d / d_norm
+
+                # Calculate the vector from p1 to P (v)
+                v = p - p1
+                
+                # Calculate the closest point on the path to the current pose
+                proj_v_onto_d = (np.dot(v, d) /np.dot(d, d) ) * d
+                closest_position = p1 + proj_v_onto_d
+
+                lookahead_position = closest_position + self.lookahead_distance * d_normalized
+                
+                # Check if the closest position is beyond the target
+                if np.linalg.norm(closest_position - p1) > np.linalg.norm(p2 - p1):
+                    # rospy.loginfo("Current position is beyond the target point. Setting lookahead to target.")
+                    lookahead_pose.pose = target.pose
+                
+                # elif np.linalg.norm(lookahead_position - p1) - np.linalg.norm(p2 - p1):
+                elif np.linalg.norm(lookahead_position - p1) - np.linalg.norm(p2 - p1) > self.lookahead_past_waypoint:
+                    # rospy.loginfo("Lookahead position is beyond the allowable lookahead distance from target. Setting lookahead to target.")
+                    lookahead_pose.pose = target.pose
+
+                else:
+                    lookahead_pose.pose.position.x = lookahead_position[0]
+                    lookahead_pose.pose.position.y = lookahead_position[1]
+                    lookahead_pose.pose.position.z = lookahead_position[2]
+                    q = quaternion_from_euler(0, 0, yaw)
+                    lookahead_pose.pose.orientation.x = q[0]
+                    lookahead_pose.pose.orientation.y = q[1]
+                    lookahead_pose.pose.orientation.z = q[2]
+                    lookahead_pose.pose.orientation.w = q[3]
+                    
+        # override the depth because we use their depth controller 
+        lookahead_pose.pose.position.z = target.pose.position.z
+        return lookahead_pose
+
+    def lookahead_method_smooth(self, target:PoseStamped, prev:PoseStamped):
+        # rospy.loginfo("SMOOTH function")
+        # setting look ahead position
+        lookahead_pose = PoseStamped()
+        lookahead_pose.header.frame_id = "NED"
+        
+        if prev == target:
+            rospy.loginfo("prev waypoint = current waypoint check")
+
+        elif prev.pose.position == target.pose.position:
+            # if they are coincident then just need to rotate 
+            lookahead_pose = target
+            rospy.loginfo("waypoints are coincident")
+
+        elif self.position_reached(self.current_pose, target):
+            lookahead_pose = target
+            
+        else:
+            # get start and tqarget yaw
+            _,_, yaw1 = euler_from_quaternion([prev.pose.orientation.x, prev.pose.orientation.y, prev.pose.orientation.z, prev.pose.orientation.w])
+            _,_, yaw2 = euler_from_quaternion([target.pose.orientation.x, target.pose.orientation.y, target.pose.orientation.z, target.pose.orientation.w])
+            
+
+            # normalize the yaw
+            if yaw1 > np.pi:
+                yaw1 -= 2 * np.pi
+            elif yaw1 < -np.pi:
+                yaw1 += 2 * np.pi
+
+            if yaw2 > np.pi:
+                yaw2 -= 2 * np.pi
+            elif yaw2 < -np.pi:
+                yaw2 += 2 * np.pi
+
+            delta_yaw = yaw2 - yaw1
+            if delta_yaw > np.pi:
+                delta_yaw -= 2 * np.pi
+            elif delta_yaw < -np.pi:
+                delta_yaw += 2 * np.pi
+        
+
+            p1 = np.array([prev.pose.position.x,prev.pose.position.y, prev.pose.position.z])
+            p2  = np.array([target.pose.position.x,target.pose.position.y, target.pose.position.z])
+            p =  np.array([self.current_pose.pose.position.x, self.current_pose.pose.position.y, self.current_pose.pose.position.z])
+            
+            # Calculate the direction vector of the line (d)
+            d = p2 - p1
+
+            d_norm = np.linalg.norm(d)
+
+            d_normalized = d / d_norm
+
+            # Calculate the vector from p1 to P (v)
+            v = p - p1
+            
+            # Calculate the closest point on the path to the current pose
+            proj_v_onto_d = (np.dot(v, d) /np.dot(d, d) ) * d
+            closest_position = p1 + proj_v_onto_d
+
+            lookahead_position = closest_position + self.lookahead_distance * d_normalized
+            
+            # Check if the closest position is beyond the target
+            if np.linalg.norm(closest_position - p1) > np.linalg.norm(p2 - p1):
+                # rospy.loginfo("Current position is beyond the target point. Setting lookahead to target.")
+                lookahead_pose.pose = target.pose
+            
+            # elif np.linalg.norm(lookahead_position - p1) - np.linalg.norm(p2 - p1):
+            elif np.linalg.norm(lookahead_position - p1) - np.linalg.norm(p2 - p1) > self.lookahead_past_waypoint:
+                # rospy.loginfo("Lookahead position is beyond the allowable lookahead distance from target. Setting lookahead to target.")
+                lookahead_pose.pose = target.pose
+
+            else:
+                lookahead_pose.pose.position.x = lookahead_position[0]
+                lookahead_pose.pose.position.y = lookahead_position[1]
+                lookahead_pose.pose.position.z = lookahead_position[2]
+
+                # get distance ratio along path and use it to interpolate the desired yaw
+                distance_ratio = np.linalg.norm(lookahead_position-p1)/d_norm
+                
+                if distance_ratio >= 1:
+                    lookahead_pose.pose.orientation = target.pose.orientation
+                else:
+                    lookahead_yaw = yaw1 + delta_yaw * distance_ratio
+
+                    if lookahead_yaw > np.pi:
+                        lookahead_yaw -= 2 * np.pi
+                    elif lookahead_yaw < -np.pi:
+                        lookahead_yaw += 2 * np.pi
+                    
+                q = quaternion_from_euler(0,0,lookahead_yaw)
+
+                lookahead_pose.pose.orientation.x = q[0]
+                lookahead_pose.pose.orientation.y = q[1]
+                lookahead_pose.pose.orientation.z = q[2]
+                lookahead_pose.pose.orientation.w = q[3]
+
+        # override the depth because we use their depth controller 
+        lookahead_pose.pose.position.z = target.pose.position.z
+        return lookahead_pose
+        
+
+
+    # lookahead methods for algorithm 1
+    def lookahead_method_TR_1(self, target:PoseStamped, prev:PoseStamped):
+        # setting look ahead position
+        lookahead_pose = PoseStamped()
+        lookahead_pose.header.frame_id = "NED"
+        
+        if prev == target:
+            rospy.loginfo("prev waypoint = current waypoint check")
+        elif prev.pose.position == target.pose.position:
+            # if they are coincident then just need to rotate 
+            lookahead_pose = target
+            rospy.loginfo("waypoints are coincident")
+        elif self.position_reached(self.current_pose, target) or self.rtr_flag1:
+                self.tr_flag1 = True
+                lookahead_pose.pose = target.pose
+        
+        else:
+            p1 = np.array([prev.pose.position.x,prev.pose.position.y, prev.pose.position.z])
+            p2  = np.array([target.pose.position.x,target.pose.position.y, target.pose.position.z])
+            p =  np.array([self.current_pose.pose.position.x, self.current_pose.pose.position.y, self.current_pose.pose.position.z])
+            
+            # Calculate the direction vector of the line (d)
+            d = p2 - p1
+            
+            # Calculate the norm of the direction vector between the two waypoints
+            d_norm = np.linalg.norm(d)
+
+            d_normalized = d / d_norm
+
+            # Calculate the vector from p1 to P (v)
+            v = p - p1
+            
+            # Calculate the closest point on the path to the current pose
+            proj_v_onto_d = (np.dot(v, d) /np.dot(d, d) ) * d
+            closest_position = p1 + proj_v_onto_d
+
+            lookahead_position = closest_position + self.lookahead_distance * d_normalized
+
+            # Check if the lookahead position is beyond the target
+            if np.linalg.norm(lookahead_position - p1) > np.linalg.norm(p2 - p1):
+                #rospy.loginfo("Lookahead position is beyond the target. Setting lookahead to target.")
+                lookahead_pose.pose = target.pose
+
+                if self.current_waypoint_index +1 < self.num_waypoints:
+                    self.current_waypoint_index +=1
+                    self.get_current_waypoint()
+                    self.reset_all_flags()
+                elif self.current_waypoint_index +1 == self.num_waypoints:
+                    rospy.logwarn_throttle(5,"Reached last waypoint")
+
+
+            else:
+                # setting the lookahead pose position
+                lookahead_pose.pose.position.x = lookahead_position[0]
+                lookahead_pose.pose.position.y = lookahead_position[1]
+                lookahead_pose.pose.position.z = lookahead_position[2]
+                lookahead_pose.pose.orientation = prev.pose.orientation
+
+        # override the depth because we use their depth controller 
+        lookahead_pose.pose.position.z = target.pose.position.z
+
+        return lookahead_pose
+
+    def lookahead_method_RT_1(self, target:PoseStamped, prev:PoseStamped):
+        # setting look ahead position
+        lookahead_pose = PoseStamped()
+        lookahead_pose.header.frame_id = "NED"
+        
+        if prev == target:
+            rospy.loginfo("prev waypoint = current waypoint check")
+
+        elif prev.pose.position == target.pose.position:
+            # if they are coincident then just need to rotate 
+            lookahead_pose = target
+            rospy.loginfo("waypoints are coincident")
+        else:         
+            p1 = np.array([prev.pose.position.x,prev.pose.position.y, prev.pose.position.z])
+            p2  = np.array([target.pose.position.x,target.pose.position.y, target.pose.position.z])
+            p =  np.array([self.current_pose.pose.position.x, self.current_pose.pose.position.y, self.current_pose.pose.position.z])
+            
+            
+            # Calculate the direction vector of the line (d)
+            d = p2 - p1
+            
+            # Calculate the norm of the direction vector between the two waypoints
+            d_norm = np.linalg.norm(d)
+
+            d_normalized = d / d_norm
+
+            # Calculate the vector from p1 to P (v)
+            v = p - p1
+            
+            # Calculate the closest point on the path to the current pose
+            proj_v_onto_d = (np.dot(v, d) /np.dot(d, d) ) * d
+            closest_position = p1 + proj_v_onto_d
+
+            lookahead_position = closest_position + self.lookahead_distance * d_normalized
+
+            if np.linalg.norm(lookahead_position - p1) > np.linalg.norm(p2 - p1):
+                #rospy.loginfo("Lookahead position is beyond the target. Setting lookahead to target.")
+                lookahead_pose.pose = target.pose
+
+                if self.current_waypoint_index +1 < self.num_waypoints:
+                    self.current_waypoint_index +=1
+                    self.get_current_waypoint()
+                    self.reset_all_flags()
+                elif self.current_waypoint_index +1 == self.num_waypoints:
+                    rospy.logwarn_throttle(5,"Reached last waypoint")
+
+            else:
+                # not self.position_reached(self.current_pose, target) and self.orientation_reached(self.current_pose, target):
+                # once orientation is reached this flag ensures that while travelling along the path we just fix the orientation as we go
+                lookahead_pose.pose.position.x = lookahead_position[0]
+                lookahead_pose.pose.position.y = lookahead_position[1]
+                lookahead_pose.pose.position.z = lookahead_position[2]
+                lookahead_pose.pose.orientation = target.pose.orientation
+        
+        # override the depth because we use their depth controller 
+        lookahead_pose.pose.position.z = target.pose.position.z
+        return lookahead_pose
+    
+    def lookahead_method_RTR_1(self, target:PoseStamped, prev:PoseStamped):
+        # setting look ahead position
+        lookahead_pose = PoseStamped()
+        lookahead_pose.header.frame_id = "NED"
+        
+        if prev == target:
+            rospy.loginfo("prev waypoint = current waypoint check")
+
+        elif prev.pose.position == target.pose.position:
+            # if they are coincident then just need to rotate 
+            lookahead_pose = target
+            rospy.loginfo("waypoints are coincident")
+
+        elif self.position_reached(self.current_pose, target):
+            lookahead_pose = target
+            # rospy.loginfo("Only need to adjust orientation")
+            # rospy.loginfo("Rotation 2")
+        else:
+            p1 = np.array([prev.pose.position.x,prev.pose.position.y, prev.pose.position.z])
+            p2  = np.array([target.pose.position.x,target.pose.position.y, target.pose.position.z])
+            p =  np.array([self.current_pose.pose.position.x, self.current_pose.pose.position.y, self.current_pose.pose.position.z])
+            
+            # Calculate the direction vector of the line (d)
+            d = p2 - p1
+
+            # get yaw to face target waypoint and normalize it
+            yaw = np.arctan2(d[1],d[0])
+            if yaw > np.pi:
+                yaw -= 2 * np.pi
+            elif yaw < -np.pi:
+                yaw += 2 * np.pi
+
+            # calculate the yaw error to face waypoint
+            yaw_error = yaw - self.current_yaw
+            #  Normalize yaw error to [-pi, pi] range
+            if yaw_error> np.pi:
+                yaw_error -= 2 * np.pi
+            elif yaw_error < -np.pi:
+                yaw_error += 2 * np.pi
+
+
+            # check if we need to make first rotation
+            if abs(yaw_error) < self.yaw_threshold:
+                self.rtr_flag1 = True
+                # rospy.loginfo(f"yaw error {yaw_error}")
+
+            if not self.rtr_flag1:
+                # rospy.loginfo("Rotation 1")
+                                             
+                # adjust orientation
+                lookahead_pose.pose.position = prev.pose.position
+                q = quaternion_from_euler(0, 0, yaw)
+                lookahead_pose.pose.orientation.x = q[0]
+                lookahead_pose.pose.orientation.y = q[1]
+                lookahead_pose.pose.orientation.z = q[2]
+                lookahead_pose.pose.orientation.w = q[3]
+
+            elif self.rtr_flag1:
+                # rospy.loginfo("Translation")
+                # Calculate the norm of the direction vector between the two waypoints
+                d_norm = np.linalg.norm(d)
+
+                d_normalized = d / d_norm
+
+                # Calculate the vector from p1 to P (v)
+                v = p - p1
+                
+                # Calculate the closest point on the path to the current pose
+                proj_v_onto_d = (np.dot(v, d) /np.dot(d, d) ) * d
+                closest_position = p1 + proj_v_onto_d
+
+                lookahead_position = closest_position + self.lookahead_distance * d_normalized
+                
+                # Check if the lookahead position is beyond the target
+                if np.linalg.norm(lookahead_position - p1) > np.linalg.norm(p2 - p1):
+                    #rospy.loginfo("Lookahead position is beyond the target. Setting lookahead to target.")
+                    lookahead_pose.pose = target.pose
+
+                    if self.current_waypoint_index +1 < self.num_waypoints:
+                        self.current_waypoint_index +=1
+                        self.get_current_waypoint()
+                        self.reset_all_flags()
+                    elif self.current_waypoint_index +1 == self.num_waypoints:
+                        rospy.logwarn_throttle(5,"Reached last waypoint")
+
+                else:
+                    lookahead_pose.pose.position.x = lookahead_position[0]
+                    lookahead_pose.pose.position.y = lookahead_position[1]
+                    lookahead_pose.pose.position.z = lookahead_position[2]
+                    q = quaternion_from_euler(0, 0, yaw)
+                    lookahead_pose.pose.orientation.x = q[0]
+                    lookahead_pose.pose.orientation.y = q[1]
+                    lookahead_pose.pose.orientation.z = q[2]
+                    lookahead_pose.pose.orientation.w = q[3]
+
+        # override the depth because we use their depth controller 
+        lookahead_pose.pose.position.z = target.pose.position.z
+
+        return lookahead_pose
+
+    def lookahead_method_smooth_1(self, target:PoseStamped, prev:PoseStamped):
+        
+        # setting look ahead position
+        lookahead_pose = PoseStamped()
+        lookahead_pose.header.frame_id = "NED"
+        
+        if prev == target:
+            rospy.loginfo("prev waypoint = current waypoint check")
+
+        elif prev.pose.position == target.pose.position:
+            # if they are coincident then just need to rotate 
+            lookahead_pose = target
+            rospy.loginfo("waypoints are coincident")
+
+        elif self.position_reached(self.current_pose, target):
+            lookahead_pose = target
+            
+        else:
+            # get start and tqarget yaw
+            _,_, yaw1 = euler_from_quaternion([prev.pose.orientation.x, prev.pose.orientation.y, prev.pose.orientation.z, prev.pose.orientation.w])
+            _,_, yaw2 = euler_from_quaternion([target.pose.orientation.x, target.pose.orientation.y, target.pose.orientation.z, target.pose.orientation.w])
+            
+
+            # normalize the yaw
+            if yaw1 > np.pi:
+                yaw1 -= 2 * np.pi
+            elif yaw1 < -np.pi:
+                yaw1 += 2 * np.pi
+
+            if yaw2 > np.pi:
+                yaw2 -= 2 * np.pi
+            elif yaw2 < -np.pi:
+                yaw2 += 2 * np.pi
+
+            delta_yaw = yaw2 - yaw1
+            if delta_yaw > np.pi:
+                delta_yaw -= 2 * np.pi
+            elif delta_yaw < -np.pi:
+                delta_yaw += 2 * np.pi
+        
+
+            p1 = np.array([prev.pose.position.x,prev.pose.position.y, prev.pose.position.z])
+            p2  = np.array([target.pose.position.x,target.pose.position.y, target.pose.position.z])
+            p =  np.array([self.current_pose.pose.position.x, self.current_pose.pose.position.y, self.current_pose.pose.position.z])
+            
+            # Calculate the direction vector of the line (d)
+            d = p2 - p1
+
+            d_norm = np.linalg.norm(d)
+
+            d_normalized = d / d_norm
+
+            # Calculate the vector from p1 to P (v)
+            v = p - p1
+            
+            # Calculate the closest point on the path to the current pose
+            proj_v_onto_d = (np.dot(v, d) /np.dot(d, d) ) * d
+            closest_position = p1 + proj_v_onto_d
+
+            lookahead_position = closest_position + self.lookahead_distance * d_normalized
+            
+            # Check if the lookahead position is beyond the target
+            if np.linalg.norm(lookahead_position - p1) > np.linalg.norm(p2 - p1):
+                rospy.loginfo("Lookahead position is beyond the target. Setting lookahead to target.")
+                lookahead_pose.pose = target.pose
+
+                if self.current_waypoint_index +1 < self.num_waypoints:
+                    self.current_waypoint_index +=1
+                    self.get_current_waypoint()
+                    self.reset_all_flags()
+                elif self.current_waypoint_index +1 == self.num_waypoints:
+                    rospy.logwarn_throttle(5,"Reached last waypoint")
+
+            else:
+                lookahead_pose.pose.position.x = lookahead_position[0]
+                lookahead_pose.pose.position.y = lookahead_position[1]
+                lookahead_pose.pose.position.z = lookahead_position[2]
+
+                # get distance ratio along path and use it to interpolate the desired yaw
+                distance_ratio = np.linalg.norm(lookahead_position-p1)/d_norm
+                
+                if distance_ratio >= 1:
+                    lookahead_pose.pose.orientation = target.pose.orientation
+                else:
+                    lookahead_yaw = yaw1 + delta_yaw * distance_ratio
+
+                    if lookahead_yaw > np.pi:
+                        lookahead_yaw -= 2 * np.pi
+                    elif lookahead_yaw < -np.pi:
+                        lookahead_yaw += 2 * np.pi
+                    
+                q = quaternion_from_euler(0,0,lookahead_yaw)
+
+                lookahead_pose.pose.orientation.x = q[0]
+                lookahead_pose.pose.orientation.y = q[1]
+                lookahead_pose.pose.orientation.z = q[2]
+                lookahead_pose.pose.orientation.w = q[3]
+
+
+        # override the depth because we use their depth controller 
+        lookahead_pose.pose.position.z = target.pose.position.z
+        return lookahead_pose
+                 
 # working pure pursuit to target waypoint
 def main():
     # Initialize the ROS node
@@ -1146,8 +1838,183 @@ def main2():
         wp.rate.sleep()
 
 
+def main3():
+    # Initialize the ROS node
+    rospy.init_node('waypoint_manager')
+    
+    # initialize the waypoint manager
+    wp = WaypointManager()
+    wp.ignore_depth = True
+
+    while not rospy.is_shutdown():
+
+        # need to look into adjusting to the target hold pose once i receive it sometimes im overshooting it 
+        if wp.state == "waypoint":
+            rospy.loginfo_once("started wp mode")
+            
+            # activate hold pose mode, only send the waypoint once
+            if wp.hold_pose and not wp.hold_pose_sent:
+                wp.goal_waypoint_pub.publish(wp.hold_pose_waypoint)
+                wp.hold_pose_sent = True
+                wp.target_waypoint_sent = False # reset the flag for the waypoint follower loop
+                rospy.loginfo("Sent hold position")
+            elif not wp.hold_pose:
+                # rospy.loginfo_once("testing this loop")
+                wp.get_current_waypoint()
+                
+                # try:
+                    # for publisbhing the first waypoint
+                if not wp.target_waypoint_sent:
+                    try:
+                        wp.get_current_waypoint()
+                        wp.get_prev_waypoint()
+                        wp.get_next_waypoint()
+                        wp.lookahead_waypoint = wp.lookahead_method_TR(wp.current_waypoint, wp.prev_waypoint)
+                        wp.lookahead_waypoint_pub.publish(wp.lookahead_waypoint)
+                        wp.goal_waypoint_pub.publish(wp.current_waypoint)
+                    except:
+                        rospy.logwarn("Could not get lookahead waypoint, setting the curent goal waypoint as the lookahead")
+                        wp.lookahead_waypoint_pub.publish(wp.current_waypoint)
+                        wp.goal_waypoint_pub.publish(wp.current_waypoint)
+            
+                    wp.target_waypoint_sent = True                      
+            
+
+                # try:
+                if wp.waypoint_reached(wp.current_pose,wp.current_waypoint):
+                    # rospy.loginfo("Waypoint Reached, heading to next waypoint")
+                    
+                    if wp.current_waypoint_index +1 < wp.num_waypoints:
+                        wp.current_waypoint_index +=1
+                        wp.get_current_waypoint()
+                        wp.get_prev_waypoint()
+                        wp.get_next_waypoint()
+                        wp.lookahead_waypoint = wp.lookahead_method_TR(wp.current_waypoint, wp.prev_waypoint)
+        
+                        wp.lookahead_waypoint_pub.publish(wp.lookahead_waypoint)                        
+                        wp.goal_waypoint_pub.publish(wp.current_waypoint)
+
+                        wp.reset_all_flags()
+                        
+                        # rospy.loginfo_once("Sent new target waypoint")
+                        # rospy.loginfo(f"The previous waypoint was \n {wp.prev_waypoint}")
+                        # rospy.loginfo(f"The next waypoint is \n {wp.next_waypoint}")
+
+
+                    elif wp.current_waypoint_index +1 == wp.num_waypoints:
+                        rospy.logwarn_throttle(5,"Reached last waypoint")
+
+                    else:
+                        rospy.loginfo_throttle(5,"Heading to waypoint")
+                else:
+                    wp.get_current_waypoint()
+                    wp.get_prev_waypoint()
+                    wp.get_next_waypoint()
+                    # wp.get_lookahead_waypoint()
+                    wp.lookahead_waypoint = wp.lookahead_method_TR(wp.current_waypoint, wp.prev_waypoint)
+        
+                    wp.lookahead_waypoint_pub.publish(wp.lookahead_waypoint)
+                    # rospy.loginfo_throttle(5,"Heading to the target waypoint")
+                    wp.goal_waypoint_pub.publish(wp.current_waypoint)
+                    # rospy.loginfo_throttle(5,"chasing look ahead waypoint")
+            # except: 
+            #     rospy.logerr("Error with sending waypoint, could not get look ahead, sending current goal waypoint")
+            #     # rospy.logwarn("Could not get lookahead waypoint, setting the curent goal waypoint as the lookahead")
+            #     wp.lookahead_waypoint_pub.publish(wp.current_waypoint)
+            #     wp.goal_waypoint_pub.publish(wp.current_waypoint)
+            else:
+                rospy.loginfo_throttle(5,"Holding Pose")
+   
+        wp.rate.sleep()
+
+
+def main4():
+    # Initialize the ROS node
+    rospy.init_node('waypoint_manager')
+    
+    # initialize the waypoint manager
+    wp = WaypointManager()
+    wp.ignore_depth = False
+
+    while not rospy.is_shutdown():
+
+        # need to look into adjusting to the target hold pose once i receive it sometimes im overshooting it 
+        if wp.state == "waypoint":
+            rospy.loginfo_once("started wp mode")
+            
+            # activate hold pose mode, only send the waypoint once
+            if wp.hold_pose and not wp.hold_pose_sent:
+                wp.lookahead_waypoint_pub.publish(wp.hold_pose_waypoint)
+                wp.goal_waypoint_pub.publish(wp.hold_pose_waypoint)
+                wp.hold_pose_sent = True
+                wp.target_waypoint_sent = False # reset the flag for the waypoint follower loop
+                rospy.loginfo("Sent hold position")
+
+
+            elif not wp.hold_pose:
+
+                if wp.alg == 1:  
+                    wp.get_current_waypoint()       
+                    wp.get_prev_waypoint()
+                    wp.get_next_waypoint()
+
+                    if wp.path_orientation_style == 1:
+                        wp.lookahead_waypoint = wp.lookahead_method_TR_1(wp.current_waypoint, wp.prev_waypoint)
+                    elif wp.path_orientation_style == 2:
+                        wp.lookahead_waypoint = wp.lookahead_method_RT_1(wp.current_waypoint, wp.prev_waypoint)
+                    elif wp.path_orientation_style == 3:
+                        wp.lookahead_waypoint = wp.lookahead_method_smooth_1(wp.current_waypoint, wp.prev_waypoint)
+                    elif wp.path_orientation_style == 4:
+                        wp.lookahead_waypoint = wp.lookahead_method_RTR_1(wp.current_waypoint, wp.prev_waypoint)
+                    else:
+                        wp.lookahead_waypoint = wp.lookahead_method_TR_1(wp.current_waypoint, wp.prev_waypoint)
+
+                
+                elif wp.alg == 2:
+                    # rospy.loginfo_once("testing this loop")
+                    wp.get_current_waypoint()       
+            
+                    if wp.waypoint_reached(wp.current_pose,wp.current_waypoint):
+                        # rospy.loginfo("Waypoint Reached, heading to next waypoint")
+                        
+                        if wp.current_waypoint_index +1 < wp.num_waypoints:
+                            wp.current_waypoint_index +=1
+                            wp.get_current_waypoint()
+                            wp.reset_all_flags()
+                        elif wp.current_waypoint_index +1 == wp.num_waypoints:
+                            rospy.logwarn_throttle(5,"Reached last waypoint")
+
+                    wp.get_prev_waypoint()
+                    wp.get_next_waypoint()
+
+                    if wp.path_orientation_style == 1:
+                        wp.lookahead_waypoint = wp.lookahead_method_TR(wp.current_waypoint, wp.prev_waypoint)
+                    elif wp.path_orientation_style == 2:
+                        wp.lookahead_waypoint = wp.lookahead_method_RT(wp.current_waypoint, wp.prev_waypoint)
+                    elif wp.path_orientation_style == 3:
+                        wp.lookahead_waypoint = wp.lookahead_method_smooth(wp.current_waypoint, wp.prev_waypoint)
+                    elif wp.path_orientation_style == 4:
+                        wp.lookahead_waypoint = wp.lookahead_method_RTR(wp.current_waypoint, wp.prev_waypoint)
+                    else:
+                        wp.lookahead_waypoint = wp.lookahead_method_TR(wp.current_waypoint, wp.prev_waypoint)
+
+
+
+                wp.lookahead_waypoint_pub.publish(wp.lookahead_waypoint)                        
+                wp.goal_waypoint_pub.publish(wp.current_waypoint)
+                        
+            else:
+                rospy.loginfo_throttle(5,"Holding Position")     
+   
+        wp.rate.sleep()
+
+
+
+
 
 if __name__ == "__main__":
 
     # main()
-    main2()
+    # main2()
+    # main3()
+    main4()
