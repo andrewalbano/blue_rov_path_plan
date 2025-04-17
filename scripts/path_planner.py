@@ -19,6 +19,7 @@ class WaypointManager:
         self.current_pose.header.frame_id ="NED"
         self.current_roll,self.current_pitch,self.current_yaw = None, None, None
         self.ignore_depth = False
+        self.ignore_orientation = False
         # creating subscribers
         self.controller_state_sub = rospy.Subscriber('motion_controller_state', String, self.controller_state_callback)
         self.pose_sub = rospy.Subscriber('/state', PoseWithCovarianceStamped, self.position_callback)
@@ -96,6 +97,8 @@ class WaypointManager:
         self.tr_flag1 =False
         self.rt_flag1 = False
         self.rtr_flag1 = False
+
+        
         # self.rtr_flag2 = False
         # self.rtr_flag3 = False
 
@@ -188,23 +191,26 @@ class WaypointManager:
         error_y = target.pose.position.y - current.pose.position.y
         error_z = target.pose.position.z - current.pose.position.z
         
+
         if self.ignore_depth:
             distance = np.linalg.norm((error_x, error_y))
         else:
             distance = np.linalg.norm((error_x, error_y, error_z))
 
-        
-
+       
         if distance < self.position_threshold:
             position_reached = True
         else: 
             position_reached = False
 
-        if abs(yaw_error) < self.yaw_threshold:
+
+        if self.ignore_orientation or abs(yaw_error) < self.yaw_threshold:
             orientation_reached = True
         else: 
             orientation_reached = False
-
+        
+        
+        
         if position_reached and orientation_reached:
             # rospy.loginfo(f"yaw error = { yaw_error*180/np.pi}")
             return True
@@ -1040,6 +1046,7 @@ class WaypointManager:
 
     # lookahead methods for algorithm 2
     def lookahead_method_TR(self, target:PoseStamped, prev:PoseStamped):
+        self.ignore_orientation = False
         # setting look ahead position
         lookahead_pose = PoseStamped()
         lookahead_pose.header.frame_id = "NED"
@@ -1103,6 +1110,7 @@ class WaypointManager:
         return lookahead_pose
 
     def lookahead_method_RT(self, target:PoseStamped, prev:PoseStamped):
+        self.ignore_orientation = False
         # setting look ahead position
         lookahead_pose = PoseStamped()
         lookahead_pose.header.frame_id = "NED"
@@ -1175,6 +1183,7 @@ class WaypointManager:
         return lookahead_pose
     
     def lookahead_method_RTR(self, target:PoseStamped, prev:PoseStamped):
+        self.ignore_orientation = False
         # setting look ahead position
         lookahead_pose = PoseStamped()
         lookahead_pose.header.frame_id = "NED"
@@ -1272,6 +1281,7 @@ class WaypointManager:
         return lookahead_pose
 
     def lookahead_method_smooth(self, target:PoseStamped, prev:PoseStamped):
+        self.ignore_orientation = False
         # rospy.loginfo("SMOOTH function")
         # setting look ahead position
         lookahead_pose = PoseStamped()
@@ -1370,11 +1380,71 @@ class WaypointManager:
         # override the depth because we use their depth controller 
         lookahead_pose.pose.position.z = target.pose.position.z
         return lookahead_pose
+    
+    def lookahead_method_ignore_orientation(self, target:PoseStamped, prev:PoseStamped):
+        # setting look ahead position
+        self.ignore_orientation = True
+        lookahead_pose = PoseStamped()
+        lookahead_pose.header.frame_id = "NED"
         
+        if prev == target:
+            rospy.loginfo("prev waypoint = current waypoint check")
+        elif prev.pose.position == target.pose.position:
+            # if they are coincident then just need to rotate 
+            lookahead_pose = target
+            rospy.loginfo("waypoints are coincident")
+        
+        else:
+            p1 = np.array([prev.pose.position.x,prev.pose.position.y, prev.pose.position.z])
+            p2  = np.array([target.pose.position.x,target.pose.position.y, target.pose.position.z])
+            p =  np.array([self.current_pose.pose.position.x, self.current_pose.pose.position.y, self.current_pose.pose.position.z])
+            
+            # Calculate the direction vector of the line (d)
+            d = p2 - p1
+            
+            # Calculate the norm of the direction vector between the two waypoints
+            d_norm = np.linalg.norm(d)
 
+            d_normalized = d / d_norm
+
+            # Calculate the vector from p1 to P (v)
+            v = p - p1
+            
+            # Calculate the closest point on the path to the current pose
+            proj_v_onto_d = (np.dot(v, d) /np.dot(d, d) ) * d
+            closest_position = p1 + proj_v_onto_d
+
+            lookahead_position = closest_position + self.lookahead_distance * d_normalized
+
+          
+            # Check if the closest position is beyond the target
+            if np.linalg.norm(closest_position - p1) > np.linalg.norm(p2 - p1):
+                # rospy.loginfo("Current position is beyond the target point. Setting lookahead to target.")
+                lookahead_pose.pose = target.pose
+
+            # elif np.linalg.norm(lookahead_position - p1) - np.linalg.norm(p2 - p1):
+            elif np.linalg.norm(lookahead_position - p1) - np.linalg.norm(p2 - p1) > self.lookahead_past_waypoint:
+                # rospy.loginfo("Lookahead position is beyond the allowable lookahead distance from target. Setting lookahead to target.")
+                lookahead_pose.pose = target.pose
+
+            # Check if the lookahead position is beyond the target
+            # elif np.linalg.norm(lookahead_position - p1) > np.linalg.norm(p2 - p1):
+            #     rospy.loginfo("Lookahead position is beyond the target. Setting lookahead to target.")
+            #     lookahead_pose.pose = target.pose
+            else:
+                # setting the lookahead pose position
+                lookahead_pose.pose.position.x = lookahead_position[0]
+                lookahead_pose.pose.position.y = lookahead_position[1]
+                lookahead_pose.pose.position.z = lookahead_position[2]
+                lookahead_pose.pose.orientation = prev.pose.orientation
+
+        # override the depth because we use their depth controller 
+        lookahead_pose.pose.position.z = target.pose.position.z
+        return lookahead_pose
 
     # lookahead methods for algorithm 1
     def lookahead_method_TR_1(self, target:PoseStamped, prev:PoseStamped):
+        self.ignore_orientation = False
         # setting look ahead position
         lookahead_pose = PoseStamped()
         lookahead_pose.header.frame_id = "NED"
@@ -1437,6 +1507,7 @@ class WaypointManager:
         return lookahead_pose
 
     def lookahead_method_RT_1(self, target:PoseStamped, prev:PoseStamped):
+        self.ignore_orientation = False
         # setting look ahead position
         lookahead_pose = PoseStamped()
         lookahead_pose.header.frame_id = "NED"
@@ -1495,6 +1566,7 @@ class WaypointManager:
         return lookahead_pose
     
     def lookahead_method_RTR_1(self, target:PoseStamped, prev:PoseStamped):
+        self.ignore_orientation = False
         # setting look ahead position
         lookahead_pose = PoseStamped()
         lookahead_pose.header.frame_id = "NED"
@@ -1595,7 +1667,7 @@ class WaypointManager:
         return lookahead_pose
 
     def lookahead_method_smooth_1(self, target:PoseStamped, prev:PoseStamped):
-        
+        self.ignore_orientation = False
         # setting look ahead position
         lookahead_pose = PoseStamped()
         lookahead_pose.header.frame_id = "NED"
@@ -1934,7 +2006,7 @@ def main4():
     
     # initialize the waypoint manager
     wp = WaypointManager()
-    wp.ignore_depth = False
+    wp.ignore_depth = True
 
     while not rospy.is_shutdown():
 
