@@ -1161,6 +1161,13 @@ class WaypointManager:
                 elif np.linalg.norm(lookahead_position - p1) - np.linalg.norm(p2 - p1) > self.lookahead_past_waypoint:
                     # rospy.loginfo("Lookahead position is beyond the allowable lookahead distance from target. Setting lookahead to target.")
                     lookahead_pose.pose = target.pose
+                    
+                elif not self.position_reached(self.current_pose, target) and not self.orientation_reached(self.current_pose, target):
+                    # once orientation is reached this flag ensures that while travelling along the path we just fix the orientation as we go
+                    lookahead_pose.pose.position.x = lookahead_position[0]
+                    lookahead_pose.pose.position.y = lookahead_position[1]
+                    lookahead_pose.pose.position.z = lookahead_position[2]
+                    lookahead_pose.pose.orientation = target.pose.orientation
 
                 elif not self.position_reached(self.current_pose, target) and self.orientation_reached(self.current_pose, target):
                     # once orientation is reached this flag ensures that while travelling along the path we just fix the orientation as we go
@@ -2006,7 +2013,7 @@ def main4():
     
     # initialize the waypoint manager
     wp = WaypointManager()
-    wp.ignore_depth = True
+    wp.ignore_depth = False
 
     while not rospy.is_shutdown():
 
