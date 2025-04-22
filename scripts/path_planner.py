@@ -2013,7 +2013,7 @@ def main4():
     
     # initialize the waypoint manager
     wp = WaypointManager()
-    wp.ignore_depth = False
+    wp.ignore_depth = True
 
     while not rospy.is_shutdown():
 
